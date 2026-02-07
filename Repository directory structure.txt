@@ -1,0 +1,46 @@
+space-debris-risk/
+  README.md
+  api_contract.md
+  .gitignore
+  docker-compose.yml
+
+  backend/
+    README.md
+    requirements.txt
+    .env.example
+    data/
+      debris_density_by_alt.csv
+    app/
+      __init__.py
+      main.py
+      schemas.py
+      data.py
+      risk.py
+      compare.py
+
+  frontend/
+    README.md
+    package.json
+    next.config.mjs
+    tsconfig.json
+    postcss.config.mjs
+    tailwind.config.ts
+    .env.local.example
+
+    src/
+      app/
+        layout.tsx
+        page.tsx
+        globals.css
+      lib/
+        api.ts
+        types.ts
+      components/
+        TopNav.tsx
+        MapPanel.tsx
+        GlobeThree.tsx
+        LaunchProfileForm.tsx
+        RiskSummaryCard.tsx
+        AltitudeRiskChart.tsx
+        HotspotsList.tsx
+        AssumptionsDrawer.tsx
