@@ -16,7 +16,6 @@ self.onmessage = function(e) {
     } else if (e.data.type === 'UPDATE') {
         propagatePositions(new Date(e.data.date));
     } else if (e.data.type === 'CHECK_RISK') {
-        // New: Run Collision Analysis
         analyzeLaunchRisk(e.data.payload);
     }
 };
@@ -43,7 +42,6 @@ async function initData() {
             }
         });
 
-        // Send metadata back
         const colors = new Float32Array(satRecords.length * 3);
         const names = [];
         for (let i = 0; i < satRecords.length; i++) {
@@ -75,62 +73,112 @@ function propagatePositions(date) {
     self.postMessage({ type: 'POSITIONS', positions: positions, gmst: gmst }, [positions.buffer]);
 }
 
-// --- NEW RISK ANALYSIS LOGIC ---
+// --- UPDATED PHYSICS ENGINE (High Orbit) ---
 function analyzeLaunchRisk(payload) {
-    const { launchLat, launchLon, launchTimeMs, ascentDuration } = payload;
+    const { launchLat, launchLon, launchTimeMs } = payload;
     const launchDate = new Date(launchTimeMs);
     const risks = [];
     const rocketPath = [];
 
-    // We check every 5 seconds of the flight
-    const timeStep = 5; 
+    // --- ROCKET PARAMETERS (Heavy Lift / Orbital Class) ---
+    // Stage 1: 0 - 180s (Liftoff)
+    // Stage 2: 180 - 900s (Orbital Insertion)
     
-    // Simulate Rocket Ascent (Simplified Gravity Turn)
-    for (let t = 0; t <= ascentDuration; t += timeStep) {
+    let velocity = 0;      // m/s
+    let altitude = 0;      // meters
+    let downrangeDist = 0; // meters (Distance traveled East)
+    let flightAngle = 90;  // Degrees
+    
+    // Physics constants
+    const dt = 1.0; 
+    const g = 9.81; 
+    
+    // Simulation Loop (1200 seconds = 20 minutes flight)
+    for (let t = 0; t <= 1200; t += dt) {
+        
+        let acceleration = 0;
+
+        if (t < 180) {
+            // STAGE 1: Fighting Gravity
+            // TWR: 1.2 -> 3.5
+            const twr = 1.2 + (2.3 * (t / 180)); 
+            acceleration = (twr * g) - g; 
+            
+            // Pitch Program: 90 -> 30 deg
+            if(altitude > 500) {
+                const progress = t / 180;
+                flightAngle = 90 - (60 * progress);
+            }
+        } 
+        else if (t < 900) {
+            // STAGE 2: Orbital Insertion (Long Burn)
+            // TWR: 0.8 -> 4.0 (Vacuum Engine)
+            const twr = 0.8 + (3.2 * ((t - 180) / 720));
+            acceleration = (twr * g); 
+            
+            // Flatten: 30 -> 0 deg
+            const progress = (t - 180) / 720;
+            flightAngle = 30 - (30 * progress);
+        }
+        else {
+            // COAST (In Orbit) - Constant Velocity
+            acceleration = 0;
+            flightAngle = 0;
+        }
+
+        // Apply Limits (Orbital Velocity ~ 7800 m/s)
+        if (velocity > 7800) acceleration = 0;
+
+        // Integration
+        const rad = flightAngle * (Math.PI / 180);
+        velocity += acceleration * dt;
+        
+        const vVert = velocity * Math.sin(rad);
+        const vHoriz = velocity * Math.cos(rad);
+        
+        altitude += vVert * dt;
+        downrangeDist += vHoriz * dt;
+
+        // Geodetic Conversion (Flying East)
+        const lat = launchLat; 
+        // 1 deg Lon = ~111km * cos(lat)
+        const metersPerDeg = 111319 * Math.cos(lat * (Math.PI/180));
+        const lon = launchLon + (downrangeDist / metersPerDeg);
+        
+        // ECI Conversion
         const simTime = new Date(launchDate.getTime() + t * 1000);
         const gmst = satellite.gstime(simTime);
-
-        // Rocket Physics Simulation (simplified)
-        // 1. Altitude grows over time (0 to 400km)
-        const progress = t / ascentDuration;
-        const altitudeKm = 400 * Math.pow(progress, 1.5); // Curves up
         
-        // 2. Downrange distance (flying East)
-        const downrangeLat = launchLat; // Keep lat simple for now
-        const downrangeLon = launchLon + (progress * 15); // Move 15 degrees East
-        
-        // 3. Convert Rocket Lat/Lon/Alt -> ECI Coordinates
         const rocketPosEcf = satellite.geodeticToEcf({
-            latitude: downrangeLat * (Math.PI/180),
-            longitude: downrangeLon * (Math.PI/180),
-            height: altitudeKm
+            latitude: lat * (Math.PI/180),
+            longitude: lon * (Math.PI/180),
+            height: altitude / 1000 // meters to km
         });
-        const rocketPosEci = satellite.ecfToEci(rocketPosEcf, gmst);
         
-        // Save path for visualization
+        const rocketPosEci = satellite.ecfToEci(rocketPosEcf, gmst);
         rocketPath.push(rocketPosEci);
 
-        // 4. CHECK COLLISIONS against all debris
-        for (let i = 0; i < satRecords.length; i++) {
-            const satPos = satellite.propagate(satRecords[i].satrec, simTime).position;
-            
-            if (satPos) {
-                // Euclidean Distance
-                const dx = satPos.x - rocketPosEci.x;
-                const dy = satPos.y - rocketPosEci.y;
-                const dz = satPos.z - rocketPosEci.z;
-                const distKm = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        // Collision Check (every 5s)
+        if (t % 5 === 0) {
+            for (let i = 0; i < satRecords.length; i++) {
+                const satPos = satellite.propagate(satRecords[i].satrec, simTime).position;
+                if (satPos) {
+                    const dx = satPos.x - rocketPosEci.x;
+                    const dy = satPos.y - rocketPosEci.y;
+                    const dz = satPos.z - rocketPosEci.z;
+                    const distKm = Math.sqrt(dx*dx + dy*dy + dz*dz);
 
-                // RISK THRESHOLD: If debris is within 50km of rocket
-                if (distKm < 100) { 
-                    risks.push({
-                        timeOffset: t,
-                        distKm: distKm,
-                        debrisName: satRecords[i].name,
-                        debrisId: satRecords[i].satnum,
-                        rocketPos: rocketPosEci,
-                        debrisPos: satPos
-                    });
+                    // Risk Threshold 50km
+                    if (distKm < 50) { 
+                        risks.push({
+                            timeOffset: t,
+                            distKm: distKm,
+                            debrisName: satRecords[i].name,
+                            debrisId: satRecords[i].satnum,
+                            rocketPos: rocketPosEci,
+                            debrisPos: satPos
+                        });
+                    }
                 }
             }
         }
