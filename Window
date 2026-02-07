@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Space Debris Simulator</title>
+
+<style>
+body {
+  margin: 0;
+  overflow: hidden;
+  background: black;
+}
+
+#ui {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  z-index: 10;
+}
+
+button {
+  font-size: 18px;
+  padding: 10px 20px;
+}
+</style>
+
+</head>
+
+<body>
+
+<div id="ui">
+  <button id="launchBtn">🚀 Launch</button>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.157/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.157/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+
+import * as THREE from "three";
+import { OrbitControls } from "https://cdn.jsdelivr.net/npm/three@0.157/examples/jsm/controls/OrbitControls.js";
+
+// Scene
+const scene = new THREE.Scene();
+
+// Camera
+const camera = new THREE.PerspectiveCamera(
+  60,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  1000
+);
+
+camera.position.set(0, 2, 4);
+
+// Renderer
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// Controls
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+// Light
+scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+
+// Earth
+const earthTexture = new THREE.TextureLoader().load(
+  "https://threejs.org/examples/textures/land_ocean_ice_cloud_2048.jpg"
+);
+
+const earth = new THREE.Mesh(
+  new THREE.SphereGeometry(1, 64, 64),
+  new THREE.MeshStandardMaterial({ map: earthTexture })
+);
+
+scene.add(earth);
+
+// Stars
+const starGeo = new THREE.BufferGeometry();
+const stars = [];
+
+for (let i = 0; i < 3000; i++) {
+  stars.push(
+    (Math.random() - 0.5) * 100,
+    (Math.random() - 0.5) * 100,
+    (Math.random() - 0.5) * 100
+  );
+}
+
+starGeo.setAttribute("position", new THREE.Float32BufferAttribute(stars, 3));
+
+const starMat = new THREE.PointsMaterial({ size: 0.3 });
+scene.add(new THREE.Points(starGeo, starMat));
+
+// Debris
+const debrisGroup = new THREE.Group();
+
+for (let i = 0; i < 400; i++) {
+  const d = new THREE.Mesh(
+    new THREE.SphereGeometry(0.01),
+    new THREE.MeshBasicMaterial({ color: 0xff4444 })
+  );
+
+  const r = 1.4 + Math.random() * 0.4;
+  const theta = Math.random() * Math.PI * 2;
+  const phi = Math.random() * Math.PI;
+
+  d.position.set(
+    r * Math.sin(phi) * Math.cos(theta),
+    r * Math.cos(phi),
+    r * Math.sin(phi) * Math.sin(theta)
+  );
+
+  debrisGroup.add(d);
+}
+
+scene.add(debrisGroup);
+
+// Rocket path
+let rocketLine = null;
+
+function launch() {
+
+  if (rocketLine) scene.remove(rocketLine);
+
+  const points = [];
+
+  for (let i = 0; i < 100; i++) {
+    const t = i / 100;
+    points.push(new THREE.Vector3(
+      0,
+      t * 2,
+      Math.sin(t * 4) * 0.5
+    ));
+  }
+
+  const geometry = new THREE.BufferGeometry().setFromPoints(points);
+
+  rocketLine = new THREE.Line(
+    geometry,
+    new THREE.LineBasicMaterial({ color: 0x00ff00 })
+  );
+
+  scene.add(rocketLine);
+}
+
+document.getElementById("launchBtn").onclick = launch;
+
+// Resize
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// Animate
+function animate() {
+  requestAnimationFrame(animate);
+
+  earth.rotation.y += 0.0008;
+  debrisGroup.rotation.y += 0.0003;
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+animate();
+
+</script>
+
+</body>
+</html>
