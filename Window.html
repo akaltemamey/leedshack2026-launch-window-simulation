@@ -2,43 +2,93 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Space Debris Simulator</title>
-
+<title>Mission Control: Focused Trajectory</title>
 <style>
-body {
-  margin: 0;
-  overflow: hidden;
-  background: black;
-}
+  body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; }
+  
+  /* UI Overlay */
+  #loading {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    color: #0f0; background: rgba(0,0,0,0.8); padding: 20px; border: 1px solid #0f0;
+    font-family: monospace; z-index: 1000;
+  }
+  
+  /* Control Panel */
+  #controls {
+    position: absolute; top: 20px; right: 20px; width: 320px;
+    background: rgba(0, 10, 20, 0.95); border: 1px solid #0088ff;
+    color: white; padding: 20px; border-radius: 8px;
+    box-shadow: 0 0 30px rgba(0, 136, 255, 0.3);
+  }
+  
+  h3 { margin: 0 0 15px 0; color: #00ccff; text-transform: uppercase; letter-spacing: 2px; font-size: 14px; border-bottom: 1px solid #444; padding-bottom: 10px; }
+  
+  .input-group { margin-bottom: 15px; }
+  label { display: block; font-size: 11px; color: #88aaff; margin-bottom: 4px; text-transform: uppercase; }
+  input { width: 100%; padding: 8px; background: #001122; border: 1px solid #335577; color: #fff; font-family: monospace; box-sizing: border-box; }
+  input:focus { outline: none; border-color: #00ccff; }
+  
+  button { 
+    width: 100%; padding: 12px; margin-top: 10px; 
+    background: linear-gradient(to bottom, #005577, #003344); 
+    border: 1px solid #00ccff; color: #fff; font-weight: bold; 
+    cursor: pointer; text-transform: uppercase; letter-spacing: 1px;
+    transition: all 0.3s;
+  }
+  button:hover { background: #006699; box-shadow: 0 0 15px #00ccff; }
+  
+  /* Results List */
+  #results { margin-top: 20px; max-height: 250px; overflow-y: auto; font-size: 12px; }
+  .risk-card { 
+    background: rgba(50, 0, 0, 0.6); border-left: 3px solid #ff0000; 
+    padding: 10px; margin-bottom: 8px; 
+  }
+  .safe-card { color: #0f0; text-align: center; padding: 10px; border: 1px dashed #0f0; }
 
-#ui {
-  position: absolute;
-  top: 20px;
-  left: 20px;
-  z-index: 10;
-}
-
-button {
-  font-size: 18px;
-  padding: 10px 20px;
-}
+  /* Labels in 3D Space */
+  #labels-container { pointer-events: none; width: 100%; height: 100%; position: absolute; top: 0; left: 0; }
+  .floating-label {
+    position: absolute; color: #fff; padding: 4px 8px; border-radius: 4px;
+    font-size: 12px; white-space: nowrap;
+    text-shadow: 0 0 5px #000;
+  }
+  .label-risk { background: rgba(255, 0, 0, 0.8); border: 1px solid #ff0000; font-weight: bold; }
 </style>
-
 </head>
-
 <body>
 
-<div id="ui">
-  <button id="launchBtn">🚀 Launch</button>
-</div>
+<div id="loading">📡 SYSTEM INITIALIZING...<br>Connecting to NORAD Database...</div>
+<div id="labels-container"></div> 
 
+<div id="controls">
+  <h3>🚀 Mission Control</h3>
+  
+  <div class="input-group">
+    <label>T-0 Launch Time</label>
+    <input type="datetime-local" id="launchTime">
+  </div>
+  
+  <div class="input-group">
+    <label>Launch Latitude</label>
+    <input type="number" id="lat" value="28.5721" step="0.0001"> 
+  </div>
+  
+  <div class="input-group">
+    <label>Launch Longitude</label>
+    <input type="number" id="lon" value="-80.6480" step="0.0001">
+  </div>
+  
+  <button onclick="runSimulation()">Run Trajectory Analysis</button>
+  <button onclick="resetSimulation()" style="background: #442222; border-color: #ff5555; margin-top: 5px;">Reset Simulation</button>
+  
+  <div id="results"></div>
+</div>
 
 <script type="importmap">
 {
   "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.157/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.157/examples/jsm/",
-    "satellite.js": "https://esm.sh/satellite.js@5.0.0"
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.157/examples/jsm/"
   }
 }
 </script>
@@ -46,18 +96,17 @@ button {
 <script type="module">
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import * as satellite from "satellite.js";
 
-// --- CONFIGURATION ---
+// --- CONFIG ---
 const EARTH_RADIUS_KM = 6371;
-const SCENE_SCALE = 1 / EARTH_RADIUS_KM; // Scale km down to Three.js units (Radius = 1)
-const SAT_SIZE = 0.02; // Dot size
-const UPDATE_INTERVAL_MS = 1000; // Update positions every second
+const SCENE_SCALE = 1 / EARTH_RADIUS_KM; 
+const SAT_SIZE = 0.035;
 
-// --- SCENE SETUP ---
+// --- SCENE ---
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
-camera.position.set(0, 0, 4); // Start further back
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 1000);
+// Start with a standard view
+camera.position.set(2.5, 1.5, 3.0); 
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -67,127 +116,311 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 
 // Lighting
-scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+const sunLight = new THREE.DirectionalLight(0xffffff, 2);
 sunLight.position.set(5, 3, 5);
 scene.add(sunLight);
 
-// --- EARTH ---
-// Note: We need accurate rotation. The texture must map 0,0 to the correct Prime Meridian.
-const earthTexture = new THREE.TextureLoader().load(
-  "https://threejs.org/examples/textures/land_ocean_ice_cloud_2048.jpg"
+// Earth
+const earthGroup = new THREE.Group();
+scene.add(earthGroup);
+const earth = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 64, 64),
+    new THREE.MeshStandardMaterial({ 
+        map: new THREE.TextureLoader().load("https://threejs.org/examples/textures/land_ocean_ice_cloud_2048.jpg"),
+        roughness: 0.6, metalness: 0.1
+    })
 );
-const earthGeo = new THREE.SphereGeometry(1, 64, 64);
-const earthMat = new THREE.MeshStandardMaterial({ map: earthTexture });
-const earth = new THREE.Mesh(earthGeo, earthMat);
-scene.add(earth);
+earthGroup.add(earth);
 
-// --- STARFIELD (Visual Reference for ECI) ---
+// Starfield
 const starGeo = new THREE.BufferGeometry();
-const starCount = 3000;
-const starPos = new Float32Array(starCount * 3);
-for(let i=0; i<starCount*3; i++) {
-    starPos[i] = (Math.random() - 0.5) * 200;
-}
+const starPos = new Float32Array(5000 * 3);
+for(let i=0; i<5000*3; i++) starPos[i] = (Math.random() - 0.5) * 400;
 starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
-const starMat = new THREE.PointsMaterial({size: 0.2, color: 0xFFFFFF});
-const stars = new THREE.Points(starGeo, starMat);
-scene.add(stars);
+scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({size: 0.1, color: 0xaaaaaa})));
 
 
-// --- REAL DEBRIS SYSTEM ---
-let satRecords = []; // Store the math objects here
-let debrisPoints = null; // The Three.js points object
+// --- ROCKET ---
+let rocketMesh;
+function createRocket() {
+    const rocketGroup = new THREE.Group();
+    // Body
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.01, 0.1, 12), new THREE.MeshLambertMaterial({ color: 0xffffff }));
+    body.rotation.x = Math.PI / 2;
+    rocketGroup.add(body);
+    // Nose
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.01, 0.03, 12), new THREE.MeshLambertMaterial({ color: 0x333333 }));
+    nose.rotation.x = Math.PI / 2;
+    nose.position.z = 0.065;
+    rocketGroup.add(nose);
+    // Flame
+    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.005, 0.04, 8), new THREE.MeshBasicMaterial({ color: 0xffaa00 }));
+    flame.rotation.x = -Math.PI / 2;
+    flame.position.z = -0.07;
+    rocketGroup.add(flame);
 
-async function initDebris() {
-    // 1. Fetch TLE Data (Active Satellites for demo)
-    console.log("Fetching TLEs...");
-    const req = await fetch('https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle');
-    const text = await req.text();
-    const lines = text.split('\n').filter(l => l.trim() !== '');
+    rocketGroup.visible = false; 
+    scene.add(rocketGroup);
+    return rocketGroup;
+}
+rocketMesh = createRocket();
 
-    // 2. Parse TLEs into satRecs
-    for (let i = 0; i < lines.length - 2; i += 3) {
-        const line1 = lines[i+1];
-        const line2 = lines[i+2];
-        try {
-            const satrec = satellite.twoline2satrec(line1, line2);
-            satRecords.push(satrec);
-        } catch (e) { }
+
+// --- WORKER & DEBRIS ---
+let debrisPoints = null;
+let satMetadata = [];
+let launchGroup = new THREE.Group(); 
+scene.add(launchGroup);
+
+// Active Risk Objects (Red Spheres)
+let riskMeshes = [];
+let activeLabels = [];
+
+const worker = new Worker('./debrisWorker.js', { type: 'module' });
+worker.postMessage({ type: 'INIT' });
+
+worker.onmessage = function(e) {
+    const data = e.data;
+    if (data.type === 'READY') {
+        createDebrisCloud(data.count, data.colors);
+        satMetadata = data.metadata;
+        document.getElementById('loading').style.display = 'none';
+        
+        // Default time: Now + 10 mins
+        const t = new Date(); t.setMinutes(t.getMinutes() + 10);
+        document.getElementById('launchTime').value = t.toISOString().slice(0, 16);
+    } 
+    else if (data.type === 'POSITIONS') {
+        updateDebris(data.positions, data.gmst);
     }
-    console.log(`Loaded ${satRecords.length} satellites.`);
+    else if (data.type === 'RISK_RESULT') {
+        startLaunchAnimation(data.risks, data.rocketPath);
+    }
+};
 
-    // 3. Create Three.js Geometry
-    const geometry = new THREE.BufferGeometry();
-    const positions = new Float32Array(satRecords.length * 3);
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    
-    const material = new THREE.PointsMaterial({ color: 0xff0000, size: SAT_SIZE });
-    debrisPoints = new THREE.Points(geometry, material);
+function createDebrisCloud(count, colors) {
+    const geo = new THREE.BufferGeometry();
+    const pos = new Float32Array(count * 3);
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    const mat = new THREE.PointsMaterial({ size: SAT_SIZE, vertexColors: true, sizeAttenuation: true });
+    debrisPoints = new THREE.Points(geo, mat);
     scene.add(debrisPoints);
 }
 
-// Function to calculate and update positions
-function updateSatellites() {
+function updateDebris(rawPositions, gmst) {
     if (!debrisPoints) return;
+    earthGroup.rotation.y = gmst; 
+    
+    // Only update debris if it is visible
+    if (debrisPoints.visible) {
+        const currentPos = debrisPoints.geometry.attributes.position.array;
+        for(let i=0; i<rawPositions.length; i+=3) {
+            if(rawPositions[i] > 90000) {
+                 currentPos[i] = 99999; currentPos[i+1] = 99999; currentPos[i+2] = 99999;
+            } else {
+                 currentPos[i] = rawPositions[i] * SCENE_SCALE;
+                 currentPos[i+1] = rawPositions[i+2] * SCENE_SCALE; 
+                 currentPos[i+2] = -rawPositions[i+1] * SCENE_SCALE;
+        }
+        }
+        debrisPoints.geometry.attributes.position.needsUpdate = true;
+    }
 
-    const now = new Date();
-    const positions = debrisPoints.geometry.attributes.position.array;
+    updateLabels();
+}
 
-    // 1. Get GMST for Earth Rotation
-    // satellite.gstime outputs radians. 
-    // We rotate Earth to match the stars (ECI frame).
-    const gmst = satellite.gstime(now);
-    earth.rotation.y = gmst; 
 
-    // 2. Propagate every satellite
-    for (let i = 0; i < satRecords.length; i++) {
-        const satrec = satRecords[i];
+// --- LAUNCH ANIMATION LOGIC ---
+let rocketPathPoints = [];
+let animationIndex = 0;
+let isAnimating = false;
+
+function startLaunchAnimation(risks, path) {
+    const resultsDiv = document.getElementById('results');
+    resultsDiv.innerHTML = "";
+    launchGroup.clear();
+    clearLabels();
+    
+    // 1. HIDE ALL DEBRIS
+    if(debrisPoints) debrisPoints.visible = false;
+    
+    // 2. Clear old risk meshes
+    riskMeshes.forEach(m => scene.remove(m));
+    riskMeshes = [];
+
+    // 3. Process Path
+    rocketPathPoints = path.map(p => new THREE.Vector3(
+        p.x * SCENE_SCALE, 
+        p.z * SCENE_SCALE, 
+        -p.y * SCENE_SCALE
+    ));
+
+    // 4. Move Camera to Launch Site (Start of path)
+    if(rocketPathPoints.length > 0) {
+        const start = rocketPathPoints[0];
+        // Move camera slightly offset from launch site
+        const offset = start.clone().normalize().multiplyScalar(0.4); // 0.4 units away
+        const camPos = start.clone().add(offset);
         
-        // Propagate
-        const positionAndVelocity = satellite.propagate(satrec, now);
-        const posEci = positionAndVelocity.position;
+        // Smooth snap (simplified)
+        camera.position.copy(camPos);
+        controls.target.copy(start);
+        controls.update();
+    }
 
-        if (posEci) {
-            // Map ECI (km) to Scene (units)
-            // Note: satellite.js X/Y/Z usually aligns differently than Three.js default
-            // Typical mapping: X->X, Y->Z, Z->-Y or similar depending on setup.
-            // For simplicity here, we map directly and rotate the camera to fit.
-            positions[i * 3]     = posEci.x * SCENE_SCALE;
-            positions[i * 3 + 1] = posEci.z * SCENE_SCALE; // Swapping Y/Z is common in Orbit controls
-            positions[i * 3 + 2] = -posEci.y * SCENE_SCALE;
+    // 5. Draw Trajectory Line (Cyan)
+    const lineGeo = new THREE.BufferGeometry().setFromPoints(rocketPathPoints);
+    const lineMat = new THREE.LineBasicMaterial({ color: 0x00ffff });
+    launchGroup.add(new THREE.Line(lineGeo, lineMat));
+
+    // 6. Highlight Risks ONLY
+    if (risks.length === 0) {
+        resultsDiv.innerHTML = "<div class='safe-card'>✅ TRAJECTORY CLEAR</div>";
+    } else {
+        risks.forEach(risk => {
+            // Coords
+            const dPos = new THREE.Vector3(risk.debrisPos.x, risk.debrisPos.z, -risk.debrisPos.y).multiplyScalar(SCENE_SCALE);
+            const rPos = new THREE.Vector3(risk.rocketPos.x, risk.rocketPos.z, -risk.rocketPos.y).multiplyScalar(SCENE_SCALE);
+
+            // A. Create VISIBLE Red Sphere for Debris
+            const riskGeo = new THREE.SphereGeometry(0.015, 16, 16);
+            const riskMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+            const riskMesh = new THREE.Mesh(riskGeo, riskMat);
+            riskMesh.position.copy(dPos);
+            scene.add(riskMesh);
+            riskMeshes.push(riskMesh);
+
+            // B. Draw Line
+            const lineG = new THREE.BufferGeometry().setFromPoints([rPos, dPos]);
+            const lineM = new THREE.LineBasicMaterial({ color: 0xff0000 });
+            launchGroup.add(new THREE.Line(lineG, lineM));
+
+            // C. UI & Label
+            resultsDiv.innerHTML += `
+                <div class="risk-card">
+                    <b>⚠️ COLLISION WARNING</b><br>
+                    OBJ: ${risk.debrisName}<br>
+                    DIST: ${risk.distKm.toFixed(1)} km<br>
+                    T+${risk.timeOffset}s
+                </div>
+            `;
+            createLabel(risk.debrisName, dPos, "risk");
+        });
+    }
+
+    // Start Animation
+    rocketMesh.visible = true;
+    animationIndex = 0;
+    isAnimating = true;
+}
+
+window.runSimulation = function() {
+    const lat = parseFloat(document.getElementById('lat').value);
+    const lon = parseFloat(document.getElementById('lon').value);
+    const timeStr = document.getElementById('launchTime').value;
+    
+    document.getElementById('results').innerHTML = "<div style='color:#0ff'>Computing orbital physics...</div>";
+    
+    worker.postMessage({
+        type: 'CHECK_RISK',
+        payload: {
+            launchLat: lat,
+            launchLon: lon,
+            launchTimeMs: new Date(timeStr).getTime(),
+            ascentDuration: 600
+        }
+    });
+};
+
+window.resetSimulation = function() {
+    isAnimating = false;
+    rocketMesh.visible = false;
+    launchGroup.clear();
+    clearLabels();
+    
+    // Show all debris again
+    if(debrisPoints) debrisPoints.visible = true;
+    
+    // Remove specific risk meshes
+    riskMeshes.forEach(m => scene.remove(m));
+    riskMeshes = [];
+
+    // Reset Camera
+    camera.position.set(2.5, 1.5, 3.0);
+    controls.target.set(0,0,0);
+    controls.update();
+
+    document.getElementById('results').innerHTML = "";
+};
+
+
+// --- LABELS ---
+function createLabel(text, positionVector, type) {
+    const div = document.createElement('div');
+    div.className = `floating-label label-${type}`;
+    div.innerText = text;
+    document.getElementById('labels-container').appendChild(div);
+    activeLabels.push({ element: div, position: positionVector });
+}
+
+function clearLabels() {
+    document.getElementById('labels-container').innerHTML = '';
+    activeLabels = [];
+}
+
+function updateLabels() {
+    activeLabels.forEach(label => {
+        const v = label.position.clone();
+        v.project(camera);
+        const x = (v.x * .5 + .5) * window.innerWidth;
+        const y = (-(v.y * .5) + .5) * window.innerHeight;
+
+        if (v.z > 1) {
+            label.element.style.display = 'none';
         } else {
-            // If error, hide point
-            positions[i*3] = 0; positions[i*3+1] = 0; positions[i*3+2] = 0;
+            label.element.style.display = 'block';
+            label.element.style.left = `${x}px`;
+            label.element.style.top = `${y}px`;
+        }
+    });
+}
+
+
+// --- LOOP ---
+function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    
+    if (isAnimating && rocketPathPoints.length > 0) {
+        if (animationIndex < rocketPathPoints.length - 1) {
+            const currentPoint = rocketPathPoints[Math.floor(animationIndex)];
+            const nextPoint = rocketPathPoints[Math.min(Math.floor(animationIndex) + 1, rocketPathPoints.length - 1)];
+            
+            rocketMesh.position.copy(currentPoint);
+            rocketMesh.lookAt(nextPoint);
+            
+            // Move camera to follow rocket? 
+            // Optional: Uncomment below to lock camera to rocket
+            // controls.target.copy(currentPoint); 
+            
+            animationIndex += 0.5;
+        } else {
+            animationIndex = 0; 
         }
     }
 
-    debrisPoints.geometry.attributes.position.needsUpdate = true;
-}
-
-// --- MAIN LOOP ---
-initDebris();
-
-function animate() {
-    requestAnimationFrame(animate);
-    
-    controls.update();
-    
-    // Update satellite positions every frame (or throttle for performance)
-    updateSatellites();
-
+    worker.postMessage({ type: 'UPDATE', date: new Date() }); 
     renderer.render(scene, camera);
 }
-
 animate();
 
-// Handle Resize
 window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
 });
 </script>
-
 </body>
 </html>
