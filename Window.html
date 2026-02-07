@@ -32,148 +32,161 @@ button {
   <button id="launchBtn">🚀 Launch</button>
 </div>
 
+
 <script type="importmap">
 {
   "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.157/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.157/examples/jsm/"
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.157/examples/jsm/",
+    "satellite.js": "https://esm.sh/satellite.js@5.0.0"
   }
 }
 </script>
 
 <script type="module">
-
 import * as THREE from "three";
-import { OrbitControls } from "https://cdn.jsdelivr.net/npm/three@0.157/examples/jsm/controls/OrbitControls.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import * as satellite from "satellite.js";
 
-// Scene
+// --- CONFIGURATION ---
+const EARTH_RADIUS_KM = 6371;
+const SCENE_SCALE = 1 / EARTH_RADIUS_KM; // Scale km down to Three.js units (Radius = 1)
+const SAT_SIZE = 0.02; // Dot size
+const UPDATE_INTERVAL_MS = 1000; // Update positions every second
+
+// --- SCENE SETUP ---
 const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(0, 0, 4); // Start further back
 
-// Camera
-const camera = new THREE.PerspectiveCamera(
-  60,
-  window.innerWidth / window.innerHeight,
-  0.1,
-  1000
-);
-
-camera.position.set(0, 2, 4);
-
-// Renderer
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
-// Controls
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 
-// Light
-scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+// Lighting
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+sunLight.position.set(5, 3, 5);
+scene.add(sunLight);
 
-// Earth
+// --- EARTH ---
+// Note: We need accurate rotation. The texture must map 0,0 to the correct Prime Meridian.
 const earthTexture = new THREE.TextureLoader().load(
   "https://threejs.org/examples/textures/land_ocean_ice_cloud_2048.jpg"
 );
-
-const earth = new THREE.Mesh(
-  new THREE.SphereGeometry(1, 64, 64),
-  new THREE.MeshStandardMaterial({ map: earthTexture })
-);
-
+const earthGeo = new THREE.SphereGeometry(1, 64, 64);
+const earthMat = new THREE.MeshStandardMaterial({ map: earthTexture });
+const earth = new THREE.Mesh(earthGeo, earthMat);
 scene.add(earth);
 
-// Stars
+// --- STARFIELD (Visual Reference for ECI) ---
 const starGeo = new THREE.BufferGeometry();
-const stars = [];
+const starCount = 3000;
+const starPos = new Float32Array(starCount * 3);
+for(let i=0; i<starCount*3; i++) {
+    starPos[i] = (Math.random() - 0.5) * 200;
+}
+starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+const starMat = new THREE.PointsMaterial({size: 0.2, color: 0xFFFFFF});
+const stars = new THREE.Points(starGeo, starMat);
+scene.add(stars);
 
-for (let i = 0; i < 3000; i++) {
-  stars.push(
-    (Math.random() - 0.5) * 100,
-    (Math.random() - 0.5) * 100,
-    (Math.random() - 0.5) * 100
-  );
+
+// --- REAL DEBRIS SYSTEM ---
+let satRecords = []; // Store the math objects here
+let debrisPoints = null; // The Three.js points object
+
+async function initDebris() {
+    // 1. Fetch TLE Data (Active Satellites for demo)
+    console.log("Fetching TLEs...");
+    const req = await fetch('https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle');
+    const text = await req.text();
+    const lines = text.split('\n').filter(l => l.trim() !== '');
+
+    // 2. Parse TLEs into satRecs
+    for (let i = 0; i < lines.length - 2; i += 3) {
+        const line1 = lines[i+1];
+        const line2 = lines[i+2];
+        try {
+            const satrec = satellite.twoline2satrec(line1, line2);
+            satRecords.push(satrec);
+        } catch (e) { }
+    }
+    console.log(`Loaded ${satRecords.length} satellites.`);
+
+    // 3. Create Three.js Geometry
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(satRecords.length * 3);
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    
+    const material = new THREE.PointsMaterial({ color: 0xff0000, size: SAT_SIZE });
+    debrisPoints = new THREE.Points(geometry, material);
+    scene.add(debrisPoints);
 }
 
-starGeo.setAttribute("position", new THREE.Float32BufferAttribute(stars, 3));
+// Function to calculate and update positions
+function updateSatellites() {
+    if (!debrisPoints) return;
 
-const starMat = new THREE.PointsMaterial({ size: 0.3 });
-scene.add(new THREE.Points(starGeo, starMat));
+    const now = new Date();
+    const positions = debrisPoints.geometry.attributes.position.array;
 
-// Debris
-const debrisGroup = new THREE.Group();
+    // 1. Get GMST for Earth Rotation
+    // satellite.gstime outputs radians. 
+    // We rotate Earth to match the stars (ECI frame).
+    const gmst = satellite.gstime(now);
+    earth.rotation.y = gmst; 
 
-for (let i = 0; i < 400; i++) {
-  const d = new THREE.Mesh(
-    new THREE.SphereGeometry(0.01),
-    new THREE.MeshBasicMaterial({ color: 0xff4444 })
-  );
+    // 2. Propagate every satellite
+    for (let i = 0; i < satRecords.length; i++) {
+        const satrec = satRecords[i];
+        
+        // Propagate
+        const positionAndVelocity = satellite.propagate(satrec, now);
+        const posEci = positionAndVelocity.position;
 
-  const r = 1.4 + Math.random() * 0.4;
-  const theta = Math.random() * Math.PI * 2;
-  const phi = Math.random() * Math.PI;
+        if (posEci) {
+            // Map ECI (km) to Scene (units)
+            // Note: satellite.js X/Y/Z usually aligns differently than Three.js default
+            // Typical mapping: X->X, Y->Z, Z->-Y or similar depending on setup.
+            // For simplicity here, we map directly and rotate the camera to fit.
+            positions[i * 3]     = posEci.x * SCENE_SCALE;
+            positions[i * 3 + 1] = posEci.z * SCENE_SCALE; // Swapping Y/Z is common in Orbit controls
+            positions[i * 3 + 2] = -posEci.y * SCENE_SCALE;
+        } else {
+            // If error, hide point
+            positions[i*3] = 0; positions[i*3+1] = 0; positions[i*3+2] = 0;
+        }
+    }
 
-  d.position.set(
-    r * Math.sin(phi) * Math.cos(theta),
-    r * Math.cos(phi),
-    r * Math.sin(phi) * Math.sin(theta)
-  );
-
-  debrisGroup.add(d);
+    debrisPoints.geometry.attributes.position.needsUpdate = true;
 }
 
-scene.add(debrisGroup);
+// --- MAIN LOOP ---
+initDebris();
 
-// Rocket path
-let rocketLine = null;
-
-function launch() {
-
-  if (rocketLine) scene.remove(rocketLine);
-
-  const points = [];
-
-  for (let i = 0; i < 100; i++) {
-    const t = i / 100;
-    points.push(new THREE.Vector3(
-      0,
-      t * 2,
-      Math.sin(t * 4) * 0.5
-    ));
-  }
-
-  const geometry = new THREE.BufferGeometry().setFromPoints(points);
-
-  rocketLine = new THREE.Line(
-    geometry,
-    new THREE.LineBasicMaterial({ color: 0x00ff00 })
-  );
-
-  scene.add(rocketLine);
-}
-
-document.getElementById("launchBtn").onclick = launch;
-
-// Resize
-window.addEventListener("resize", () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
-
-// Animate
 function animate() {
-  requestAnimationFrame(animate);
+    requestAnimationFrame(animate);
+    
+    controls.update();
+    
+    // Update satellite positions every frame (or throttle for performance)
+    updateSatellites();
 
-  earth.rotation.y += 0.0008;
-  debrisGroup.rotation.y += 0.0003;
-
-  controls.update();
-  renderer.render(scene, camera);
+    renderer.render(scene, camera);
 }
 
 animate();
 
+// Handle Resize
+window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
 </script>
 
 </body>
