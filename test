@@ -1,0 +1,656 @@
+"use client"
+
+import { Suspense, useRef, useMemo, useState, useEffect } from "react"
+import { Canvas, useFrame, useLoader } from "@react-three/fiber"
+import { OrbitControls, Html, Stars, Line } from "@react-three/drei"
+import * as THREE from "three"
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js"
+
+// --- TYPES ---
+
+export interface Hotspot {
+  lat: number
+  lon: number
+  label: string
+  weight: number // 0 to 1 (risk level)
+  altitudeBand: string
+}
+
+export interface SatellitePosition {
+  id: string
+  name: string
+  lat: number
+  lon: number
+  altitudeKm: number
+  type: "active" | "debris" | "station" | "recent"
+  noradId: number
+}
+
+interface GlobeVisualizationProps {
+  launchSite: { lat: number; lon: number; name: string } | null
+  corridorPath: { lat: number; lon: number }[]
+  corridorWidth: number
+  hotspots: Hotspot[]
+  showCorridor: boolean
+  showHotspots: boolean
+  showSatellites: boolean
+  satellites: SatellitePosition[]
+  compareCorridorPath?: { lat: number; lon: number }[]
+}
+
+// --- MATH HELPERS ---
+
+const EARTH_RADIUS = 2.0
+const EARTH_RADIUS_KM = 6371
+
+function latLonToVector3(lat: number, lon: number, radius: number): THREE.Vector3 {
+  const phi = (90 - lat) * (Math.PI / 180)
+  const theta = (lon + 180) * (Math.PI / 180)
+  const x = -(radius * Math.sin(phi) * Math.cos(theta))
+  const y = radius * Math.cos(phi)
+  const z = radius * Math.sin(phi) * Math.sin(theta)
+  return new THREE.Vector3(x, y, z)
+}
+
+// Deterministic 0..1 hash from string (stable per id, avoids flicker).
+function hash01(str: string): number {
+  let h = 2166136261
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  // Convert to 0..1
+  return ((h >>> 0) % 100000) / 100000
+}
+
+// --- SUB-COMPONENTS ---
+
+function Earth() {
+  const earthRef = useRef<THREE.Mesh>(null)
+  const cloudsRef = useRef<THREE.Mesh>(null)
+  const glowRef = useRef<THREE.Mesh>(null)
+
+  const [dayMap, nightMap, normalMap, specMap, cloudsMap] = useLoader(THREE.TextureLoader, [
+    "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_atmos_2048.jpg",
+    "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_lights_2048.png",
+    "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_normal_2048.jpg",
+    "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_specular_2048.jpg",
+    "https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/textures/planets/earth_clouds_2048.png",
+  ])
+
+  useMemo(() => {
+    const setup = (t: THREE.Texture, isColor: boolean) => {
+      t.anisotropy = 8
+      if (isColor) (t as any).colorSpace = (THREE as any).SRGBColorSpace
+      t.needsUpdate = true
+    }
+    setup(dayMap, true)
+    setup(nightMap, true)
+    setup(cloudsMap, true)
+    setup(normalMap, false)
+    setup(specMap, false)
+  }, [dayMap, nightMap, normalMap, specMap, cloudsMap])
+
+  useFrame((state) => {
+    const t = state.clock.elapsedTime
+    if (cloudsRef.current) cloudsRef.current.rotation.y += 0.00035
+    if (glowRef.current) {
+      const mat = glowRef.current.material as THREE.MeshBasicMaterial
+      mat.opacity = 0.05 + Math.sin(t * 0.6) * 0.02
+    }
+  })
+
+  return (
+    <group>
+      <mesh ref={earthRef}>
+        <sphereGeometry args={[EARTH_RADIUS - 0.01, 64, 64]} />
+        <meshPhongMaterial
+          map={dayMap}
+          normalMap={normalMap}
+          normalScale={new THREE.Vector2(0.6, 0.6)}
+          specularMap={specMap}
+          specular={new THREE.Color("#2a5aa3")}
+          shininess={15}
+          emissiveMap={nightMap}
+          emissive={new THREE.Color("#ffffff")}
+          emissiveIntensity={0.85}
+        />
+      </mesh>
+      <mesh ref={cloudsRef}>
+        <sphereGeometry args={[EARTH_RADIUS + 0.01, 64, 64]} />
+        <meshPhongMaterial map={cloudsMap} transparent opacity={0.6} depthWrite={false} side={THREE.DoubleSide} />
+      </mesh>
+      <mesh ref={glowRef}>
+        <sphereGeometry args={[EARTH_RADIUS + 0.05, 64, 64]} />
+        <meshBasicMaterial color="#66ccff" transparent opacity={0.05} />
+      </mesh>
+    </group>
+  )
+}
+
+function Atmosphere() {
+  return (
+    <mesh>
+      <sphereGeometry args={[EARTH_RADIUS + 0.08, 64, 64]} />
+      <meshBasicMaterial color="#58c4ff" transparent opacity={0.05} side={THREE.BackSide} />
+    </mesh>
+  )
+}
+
+function Rocket({ curve }: { curve: THREE.CatmullRomCurve3 }) {
+  const rocketRef = useRef<THREE.Group>(null)
+  const flameRef = useRef<THREE.Mesh>(null)
+  const SPEED = 0.15
+
+  useFrame((state) => {
+    if (!rocketRef.current || !curve) return
+    const t = (state.clock.elapsedTime * SPEED) % 1
+    const position = curve.getPointAt(t)
+    const tangent = curve.getTangentAt(t).normalize()
+
+    rocketRef.current.position.copy(position)
+    const up = new THREE.Vector3(0, 1, 0)
+    rocketRef.current.quaternion.setFromUnitVectors(up, tangent)
+
+    if (flameRef.current) {
+      flameRef.current.scale.setScalar(0.8 + Math.random() * 0.4)
+    }
+  })
+
+  return (
+    <group ref={rocketRef}>
+      <mesh position={[0, 0.03, 0]}>
+        <cylinderGeometry args={[0.015, 0.025, 0.1, 8]} />
+        <meshStandardMaterial color="white" metalness={0.6} roughness={0.2} />
+      </mesh>
+      <mesh position={[0, 0.1, 0]}>
+        <coneGeometry args={[0.015, 0.05, 8]} />
+        <meshStandardMaterial color="#ef4444" />
+      </mesh>
+      <mesh ref={flameRef} position={[0, -0.04, 0]} rotation={[Math.PI, 0, 0]}>
+        <coneGeometry args={[0.01, 0.08, 8]} />
+        <meshBasicMaterial color="#f59e0b" transparent opacity={0.9} />
+      </mesh>
+      <pointLight distance={0.5} intensity={2} color="#f59e0b" position={[0, -0.05, 0]} />
+    </group>
+  )
+}
+
+function Trajectory({
+  path,
+  visible,
+  color = "#22d3ee",
+}: {
+  path: { lat: number; lon: number }[]
+  visible: boolean
+  color?: string
+}) {
+  const { curve, linePoints } = useMemo(() => {
+    if (path.length < 2) return { curve: null as any, linePoints: [] as THREE.Vector3[] }
+    const points: THREE.Vector3[] = []
+
+    // Lower altitude (0.4 = 20% of Earth Radius) for a more realistic LEO look.
+    const MAX_ALTITUDE = 0.4
+
+    path.forEach((p, i) => {
+      const progress = i / (path.length - 1)
+
+      // Ease Out Quartic for a simple "gravity turn" feel:
+      // 1) fast climb early, 2) pitches over quickly, 3) then stays near max altitude.
+      const altitudeCurve = 1 - Math.pow(1 - progress, 4)
+      const currentAltitude = EARTH_RADIUS + altitudeCurve * MAX_ALTITUDE
+
+      points.push(latLonToVector3(p.lat, p.lon, currentAltitude))
+    })
+
+    const curve = new THREE.CatmullRomCurve3(points)
+    curve.curveType = "catmullrom"
+    curve.tension = 0.5
+    const linePoints = curve.getPoints(60)
+
+    return { curve, linePoints }
+  }, [path])
+
+  if (!visible || !curve) return null
+
+  return (
+    <group>
+      <Line
+        points={linePoints}
+        color={color}
+        opacity={0.6}
+        transparent
+        lineWidth={2}
+        dashed
+        dashScale={8}
+        dashSize={0.4}
+        gapSize={0.2}
+      />
+      <Rocket curve={curve} />
+      <mesh position={linePoints[linePoints.length - 1]}>
+        <sphereGeometry args={[0.04, 16, 16]} />
+        <meshBasicMaterial color={color} transparent opacity={0.5} />
+      </mesh>
+    </group>
+  )
+}
+
+function LaunchSiteMarker({ lat, lon, name }: { lat: number; lon: number; name: string }) {
+  const position = useMemo(() => latLonToVector3(lat, lon, EARTH_RADIUS + 0.02), [lat, lon])
+  const [hovered, setHovered] = useState(false)
+
+  return (
+    <group position={position}>
+      <mesh onPointerOver={() => setHovered(true)} onPointerOut={() => setHovered(false)}>
+        <sphereGeometry args={[0.04, 16, 16]} />
+        <meshBasicMaterial color="#22d3ee" transparent opacity={0.8} />
+      </mesh>
+      <mesh>
+        <ringGeometry args={[0.06, 0.08, 32]} />
+        <meshBasicMaterial color="#22d3ee" transparent opacity={0.5} side={THREE.DoubleSide} />
+      </mesh>
+      {hovered && (
+        <Html distanceFactor={6} style={{ pointerEvents: "none" }}>
+          <div className="rounded bg-black/80 px-2 py-1 text-xs text-white border border-gray-700 whitespace-nowrap backdrop-blur-md">
+            {name}
+          </div>
+        </Html>
+      )}
+    </group>
+  )
+}
+
+function HotspotMarker({
+  hotspot,
+  visible,
+  onHover,
+}: {
+  hotspot: Hotspot
+  visible: boolean
+  onHover: (h: Hotspot | null) => void
+}) {
+  const position = useMemo(() => latLonToVector3(hotspot.lat, hotspot.lon, EARTH_RADIUS + 0.05), [hotspot.lat, hotspot.lon])
+  const [hovered, setHovered] = useState(false)
+  const pulseRef = useRef<THREE.Mesh>(null)
+
+  useFrame((state) => {
+    if (pulseRef.current) {
+      const scale = 1 + Math.sin(state.clock.elapsedTime * 3) * 0.3
+      pulseRef.current.scale.setScalar(scale)
+    }
+  })
+
+  if (!visible) return null
+  const size = 0.02 + hotspot.weight * 0.03
+  const color = hotspot.weight > 0.7 ? "#ef4444" : hotspot.weight > 0.4 ? "#f59e0b" : "#22c55e"
+
+  return (
+    <group position={position}>
+      <mesh
+        onPointerOver={(e) => {
+          e.stopPropagation()
+          setHovered(true)
+          onHover(hotspot)
+        }}
+        onPointerOut={() => {
+          setHovered(false)
+          onHover(null)
+        }}
+      >
+        <sphereGeometry args={[size, 16, 16]} />
+        <meshBasicMaterial color={color} />
+      </mesh>
+      <mesh ref={pulseRef}>
+        <sphereGeometry args={[size * 1.5, 16, 16]} />
+        <meshBasicMaterial color={color} transparent opacity={0.3} />
+      </mesh>
+      {hovered && (
+        <Html distanceFactor={6} style={{ pointerEvents: "none" }}>
+          <div className="rounded bg-black/80 px-3 py-2 text-xs text-white border border-gray-700 whitespace-nowrap backdrop-blur-md">
+            <div className="font-bold">{hotspot.label}</div>
+            <div className="text-gray-300">
+              Alt: {hotspot.altitudeBand} | Risk: {(hotspot.weight * 100).toFixed(0)}%
+            </div>
+          </div>
+        </Html>
+      )}
+    </group>
+  )
+}
+
+function SatelliteLayer({ satellites, visible }: { satellites: SatellitePosition[]; visible: boolean }) {
+  const satMeshRef = useRef<THREE.InstancedMesh>(null)
+  const debrisMeshRef = useRef<THREE.InstancedMesh>(null)
+
+  const [hoveredSatIdx, setHoveredSatIdx] = useState<number | null>(null)
+  const [hoveredDebrisIdx, setHoveredDebrisIdx] = useState<number | null>(null)
+
+  // Split the incoming data so we can use different geometries for satellites vs debris.
+  const satList = useMemo(() => satellites.filter((s) => s.type !== "debris"), [satellites])
+  const debrisList = useMemo(() => satellites.filter((s) => s.type === "debris"), [satellites])
+
+  // Satellite "shape": body + two solar panels + boom + antenna dish.
+  // We merge them into ONE geometry so we can render with InstancedMesh efficiently.
+  const satelliteGeometry = useMemo(() => {
+    const body = new THREE.BoxGeometry(0.22, 0.12, 0.12) // main bus
+    const panel = new THREE.BoxGeometry(0.35, 0.04, 0.12) // solar panel
+
+    const panelL = panel.clone()
+    panelL.translate(-0.33, 0, 0)
+
+    const panelR = panel.clone()
+    panelR.translate(0.33, 0, 0)
+
+    const boom = new THREE.CylinderGeometry(0.015, 0.015, 0.18, 10) // boom
+    boom.rotateZ(Math.PI / 2)
+    boom.translate(0, 0.02, 0)
+
+    const dish = new THREE.CylinderGeometry(0.06, 0.06, 0.03, 12) // antenna/dish
+    dish.rotateX(Math.PI / 2)
+    dish.translate(0, 0.10, 0.08)
+
+    // IMPORTANT: Convert to non-indexed to reduce the chance that merge returns null.
+    const geoms = [body, panelL, panelR, boom, dish].map((g) => g.toNonIndexed())
+
+    const merged = mergeGeometries(geoms, false)
+
+    // Fallback if merge fails for any reason.
+    const finalGeom = (merged ?? body.toNonIndexed()) as THREE.BufferGeometry
+
+    finalGeom.computeVertexNormals()
+    finalGeom.computeBoundingSphere()
+    finalGeom.computeBoundingBox()
+
+    return finalGeom
+  }, [])
+
+  // Debris "shape": an irregular shard-like geometry (single geometry used for instancing).
+  // We create an icosahedron and perturb its vertices once, making it look "broken".
+  const debrisGeometry = useMemo(() => {
+    const base = new THREE.IcosahedronGeometry(0.18, 0).toNonIndexed()
+    const pos = base.getAttribute("position") as THREE.BufferAttribute
+
+    // Perturb vertices to make the shape irregular.
+    // This runs once, so all debris share the same "shard" silhouette, but each instance gets random rotation.
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i)
+      const y = pos.getY(i)
+      const z = pos.getZ(i)
+
+      // Push/pull along the vertex direction
+      const v = new THREE.Vector3(x, y, z).normalize()
+      const r = 1 + (Math.random() * 2 - 1) * 0.35 // +/- 35%
+      const n = (Math.random() * 2 - 1) * 0.03 // small noise
+
+      pos.setXYZ(i, x * r + v.x * n, y * r + v.y * n, z * r + v.z * n)
+    }
+
+    pos.needsUpdate = true
+    base.computeVertexNormals()
+    base.computeBoundingSphere()
+    base.computeBoundingBox()
+
+    return base
+  }, [])
+
+  // Build matrices for satellites (GREEN satellites).
+  const satData = useMemo(() => {
+    if (!satList || satList.length === 0) {
+      return { matrices: new Float32Array(0), count: 0 }
+    }
+
+    const cnt = satList.length
+    const mat = new Float32Array(cnt * 16)
+
+    const dummy = new THREE.Matrix4()
+    const q = new THREE.Quaternion()
+    const up = new THREE.Vector3(0, 1, 0)
+    const scaleV = new THREE.Vector3()
+
+    const SIZE_MULT = 2.6 // global size multiplier for satellites
+
+    for (let i = 0; i < cnt; i++) {
+      const sat = satList[i]
+
+      const normAlt = Math.max(0.1, Math.min(sat.altitudeKm / 5000, 1.5))
+      const radius = EARTH_RADIUS + normAlt
+      const pos = latLonToVector3(sat.lat, sat.lon, radius)
+
+      // Keep your original size tiers (excluding debris now).
+      const baseSize = sat.type === "station" ? 0.04 : 0.018
+      const size = baseSize * SIZE_MULT
+
+      // Face roughly outward from Earth's center.
+      const outward = pos.clone().normalize()
+      q.setFromUnitVectors(up, outward)
+
+      scaleV.set(size, size, size)
+      dummy.compose(pos, q, scaleV)
+      dummy.toArray(mat, i * 16)
+    }
+
+    return { matrices: mat, count: cnt }
+  }, [satList])
+
+  // Build matrices for debris (RED irregular fragments).
+  const debrisData = useMemo(() => {
+    if (!debrisList || debrisList.length === 0) {
+      return { matrices: new Float32Array(0), count: 0 }
+    }
+
+    const cnt = debrisList.length
+    const mat = new Float32Array(cnt * 16)
+
+    const dummy = new THREE.Matrix4()
+    const qOut = new THREE.Quaternion()
+    const qRoll = new THREE.Quaternion()
+    const up = new THREE.Vector3(0, 1, 0)
+    const scaleV = new THREE.Vector3()
+
+    const SIZE_MULT = 2.6 // global size multiplier for debris fragments
+
+    for (let i = 0; i < cnt; i++) {
+      const d = debrisList[i]
+
+      const normAlt = Math.max(0.1, Math.min(d.altitudeKm / 5000, 1.5))
+      const radius = EARTH_RADIUS + normAlt
+      const pos = latLonToVector3(d.lat, d.lon, radius)
+
+      // Debris should be smaller than satellites.
+      const baseSize = 0.012
+      const size = baseSize * SIZE_MULT
+
+      // Face outward, then add a stable random roll to make each fragment feel different.
+      const outward = pos.clone().normalize()
+      qOut.setFromUnitVectors(up, outward)
+
+      const r = hash01(d.id || `${d.noradId}`) // stable 0..1
+      const angle = r * Math.PI * 2
+      qRoll.setFromAxisAngle(outward, angle)
+
+      // Apply roll after outward orientation.
+      const q = qOut.clone().multiply(qRoll)
+
+      scaleV.set(size, size, size)
+      dummy.compose(pos, q, scaleV)
+      dummy.toArray(mat, i * 16)
+    }
+
+    return { matrices: mat, count: cnt }
+  }, [debrisList])
+
+  // Apply satellite instances when data changes (avoid heavy per-frame work).
+  useEffect(() => {
+    const m = satMeshRef.current
+    if (!m || !visible || satData.count === 0) return
+
+    m.count = satData.count
+
+    const tmp = new THREE.Matrix4()
+    for (let i = 0; i < satData.count; i++) {
+      tmp.fromArray(satData.matrices, i * 16)
+      m.setMatrixAt(i, tmp)
+    }
+
+    m.instanceMatrix.needsUpdate = true
+    m.frustumCulled = false
+  }, [satData, visible])
+
+  // Apply debris instances when data changes.
+  useEffect(() => {
+    const m = debrisMeshRef.current
+    if (!m || !visible || debrisData.count === 0) return
+
+    m.count = debrisData.count
+
+    const tmp = new THREE.Matrix4()
+    for (let i = 0; i < debrisData.count; i++) {
+      tmp.fromArray(debrisData.matrices, i * 16)
+      m.setMatrixAt(i, tmp)
+    }
+
+    m.instanceMatrix.needsUpdate = true
+    m.frustumCulled = false
+  }, [debrisData, visible])
+
+  if (!visible) return null
+
+  // Tooltip selection priority: satellites first, then debris.
+  const tooltipItem =
+    hoveredSatIdx !== null && satList[hoveredSatIdx]
+      ? { item: satList[hoveredSatIdx], kind: "satellite" as const }
+      : hoveredDebrisIdx !== null && debrisList[hoveredDebrisIdx]
+        ? { item: debrisList[hoveredDebrisIdx], kind: "debris" as const }
+        : null
+
+  const tooltipNode = (() => {
+    if (!tooltipItem) return null
+    const s = tooltipItem.item
+    const altKm = Math.max(0, s.altitudeKm || 0)
+    const satRadius = EARTH_RADIUS * (1 + altKm / EARTH_RADIUS_KM)
+    const hoverPos = latLonToVector3(s.lat, s.lon, satRadius + 0.05)
+
+    const title = tooltipItem.kind === "debris" ? (s.name || "Debris") : (s.name || "Satellite")
+
+    return (
+      <Html position={hoverPos} distanceFactor={6} style={{ pointerEvents: "none" }}>
+        <div className="rounded-md bg-card/95 px-3 py-2 text-xs font-sans text-card-foreground shadow-lg border border-border whitespace-nowrap backdrop-blur-sm">
+          <div className="font-medium">{title}</div>
+          <div className="text-muted-foreground flex gap-2">
+            <span>NORAD {s.noradId}</span>
+            <span>Alt: {Math.round(s.altitudeKm)} km</span>
+          </div>
+          <div className="text-muted-foreground capitalize">{tooltipItem.kind}</div>
+        </div>
+      </Html>
+    )
+  })()
+
+  return (
+    <group>
+      {/* GREEN satellites (all non-debris types) */}
+      {satData.count > 0 && (
+        <instancedMesh
+          ref={satMeshRef}
+          args={[satelliteGeometry, undefined as any, satData.count]}
+          count={satData.count}
+          frustumCulled={false}
+          onPointerMove={(e) => {
+            e.stopPropagation()
+            if (e.instanceId !== undefined) {
+              setHoveredSatIdx(e.instanceId)
+              setHoveredDebrisIdx(null)
+            }
+          }}
+          onPointerOut={() => setHoveredSatIdx(null)}
+        >
+          <meshStandardMaterial
+            color="#22c55e" // green satellites
+            transparent
+            opacity={0.85}
+            depthWrite={false}
+            toneMapped={false}
+            metalness={0.25}
+            roughness={0.7}
+          />
+        </instancedMesh>
+      )}
+
+      {/* RED irregular debris fragments */}
+      {debrisData.count > 0 && (
+        <instancedMesh
+          ref={debrisMeshRef}
+          args={[debrisGeometry, undefined as any, debrisData.count]}
+          count={debrisData.count}
+          frustumCulled={false}
+          onPointerMove={(e) => {
+            e.stopPropagation()
+            if (e.instanceId !== undefined) {
+              setHoveredDebrisIdx(e.instanceId)
+              setHoveredSatIdx(null)
+            }
+          }}
+          onPointerOut={() => setHoveredDebrisIdx(null)}
+        >
+          <meshStandardMaterial
+            color="#ef4444" // red debris
+            transparent
+            opacity={0.85}
+            depthWrite={false}
+            toneMapped={false}
+            metalness={0.05}
+            roughness={0.95}
+          />
+        </instancedMesh>
+      )}
+
+      {tooltipNode}
+    </group>
+  )
+}
+
+// --- MAIN COMPONENT ---
+
+export default function GlobeVisualization({
+  launchSite,
+  corridorPath,
+  corridorWidth,
+  hotspots,
+  showCorridor,
+  showHotspots,
+  showSatellites,
+  satellites,
+  compareCorridorPath,
+}: GlobeVisualizationProps) {
+  const [, setHoveredHotspot] = useState<Hotspot | null>(null)
+
+  return (
+    <div className="w-full h-full relative" style={{ minHeight: "500px" }}>
+      <Canvas camera={{ position: [0, 0, 6], fov: 45 }} gl={{ antialias: true, alpha: true }}>
+        <color attach="background" args={["#000005"]} />
+        <Suspense fallback={null}>
+          <ambientLight intensity={0.4} />
+          <directionalLight position={[10, 5, 5]} intensity={1.5} />
+          <Stars radius={100} depth={50} count={3000} factor={4} saturation={0} fade speed={0.5} />
+
+          <Earth />
+          <Atmosphere />
+
+          <SatelliteLayer satellites={satellites} visible={showSatellites} />
+
+          {launchSite && <LaunchSiteMarker lat={launchSite.lat} lon={launchSite.lon} name={launchSite.name} />}
+
+          <Trajectory path={corridorPath} visible={showCorridor} color="#22d3ee" />
+
+          {compareCorridorPath && <Trajectory path={compareCorridorPath} visible={showCorridor} color="#f59e0b" />}
+
+          {hotspots.map((h, i) => (
+            <HotspotMarker key={`hotspot-${i}`} hotspot={h} visible={showHotspots} onHover={setHoveredHotspot} />
+          ))}
+
+          <OrbitControls enablePan={false} minDistance={3.5} maxDistance={12} enableDamping dampingFactor={0.05} />
+        </Suspense>
+      </Canvas>
+    </div>
+  )
+}
